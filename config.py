@@ -38,9 +38,21 @@ HOURS_PER_DAY = 24
 MAGNITUDE_THRESHOLD = 0.09  # Normal detection: 9% deviation threshold (lowered from 10% - still above 8% floor)
 MIN_ANOMALY_DURATION = 2    # Default minimum duration (for medium/strong attacks)
 
+# Scaling ratio configuration
+SCALING_REFERENCE = 'forecast'  # Options: 'forecast', 'benchmark'
+SCALING_EPSILON = 1e-6          # Small constant to avoid division by zero
+
+# Instant alert configuration (Phase 2)
+INSTANT_ALERT_THRESHOLD = 0.35           # deviation level for instant trigger (~35%)
+INSTANT_ALERT_CONFIRMATION_HOURS = 2     # consecutive hours required before alerting
+EMERGENCY_COOLDOWN_HOURS = 6             # minimum hours between emergency alerts
+
+# Deviation buffer to reduce noise-triggered DP scoring
+DEVIATION_BUFFER = 0.02  # require ~2% additional deviation beyond threshold for scoring
+
 # Magnitude-aware duration requirements (Phase 2 optimization)
-MIN_DURATION_WEAK = 3       # Weak attacks (<25%): require moderate duration (lowered from 6 to catch more attacks)
-MIN_DURATION_MEDIUM = 2     # Medium attacks (25-40%): standard duration
+MIN_DURATION_WEAK = 4       # Weak attacks (<25%): require moderate duration
+MIN_DURATION_MEDIUM = 3     # Medium attacks (25-40%): standard duration
 MIN_DURATION_STRONG = 1     # Strong attacks (>40%): can detect very quickly
 
 # Emergency Mode: INSTANT detection for catastrophic spikes
@@ -52,9 +64,9 @@ LAMBDA_SCORE = 2.0  # Super-additive score function parameter (improved for bett
 MIN_ANOMALY_SCORE = 0.30  # Minimum score threshold to accept detection (default for medium durations)
 
 # Duration-aware score thresholds (Phase 2 optimization)
-MIN_ANOMALY_SCORE_SHORT = 0.08   # For durations 1-5 hours (aggressive threshold for short weak attacks)
-MIN_ANOMALY_SCORE_MEDIUM = 0.20  # For durations 6-11 hours
-MIN_ANOMALY_SCORE_LONG = 0.15    # For durations 12+ hours (longer attacks accumulate more evidence)
+MIN_ANOMALY_SCORE_SHORT = 0.12   # For durations 1-5 hours
+MIN_ANOMALY_SCORE_MEDIUM = 0.28  # For durations 6-11 hours
+MIN_ANOMALY_SCORE_LONG = 0.22    # For durations 12+ hours (longer attacks accumulate more evidence)
 
 # Segmentation parameters (Phase 1 improvement)
 SEGMENT_GAP_HOURS = 3  # Consecutive normal hours needed to break segments

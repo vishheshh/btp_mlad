@@ -636,13 +636,14 @@ def detect_anomaly_timing(scaling_data, timestamps=None, max_detections=1):
     differential_deviation = np.maximum(differential_deviation, 0)  # Only positive differences
     
     # Calculate deviation scores based on differential (change from local baseline)
-    base_scores = np.where(differential_deviation > config.MAGNITUDE_THRESHOLD, 
-                           differential_deviation - config.MAGNITUDE_THRESHOLD, 
+    deviation_floor = config.MAGNITUDE_THRESHOLD + getattr(config, 'DEVIATION_BUFFER', 0.0)
+    base_scores = np.where(differential_deviation > deviation_floor, 
+                           differential_deviation - deviation_floor, 
                            0)
     
     # Apply magnitude-aware scoring with exponential amplification
     # Use DIFFERENTIAL deviation to classify attack strength
-    weak_mask = (differential_deviation >= config.MAGNITUDE_THRESHOLD) & (differential_deviation < 0.30)
+    weak_mask = (differential_deviation >= deviation_floor) & (differential_deviation < 0.30)
     medium_strong_mask = differential_deviation >= 0.30
     
     scores = np.zeros_like(base_scores)
@@ -823,9 +824,10 @@ def segment_anomaly_interval(scaling_data, start_idx, end_idx, min_gap=None):
             min_gap = config.SEGMENT_GAP_HOURS
     
     deviation = np.abs(scaling_data - 1.0)
+    threshold_for_segments = config.MAGNITUDE_THRESHOLD + getattr(config, 'DEVIATION_BUFFER', 0.0)
     
     # Find hours above threshold in the interval
-    above_threshold = deviation[start_idx:end_idx+1] > config.MAGNITUDE_THRESHOLD
+    above_threshold = deviation[start_idx:end_idx+1] > threshold_for_segments
     
     segments = []
     segment_start = None
@@ -847,8 +849,8 @@ def segment_anomaly_interval(scaling_data, start_idx, end_idx, min_gap=None):
                 
                 # Calculate segment score
                 seg_deviation = deviation[segment_start:segment_end+1]
-                seg_base_scores = np.where(seg_deviation > config.MAGNITUDE_THRESHOLD,
-                                          seg_deviation - config.MAGNITUDE_THRESHOLD,
+                seg_base_scores = np.where(seg_deviation > threshold_for_segments,
+                                          seg_deviation - threshold_for_segments,
                                           0)
                 seg_scores = seg_base_scores * (1 + config.LAMBDA_SCORE * seg_base_scores)
                 segment_score = np.sum(seg_scores)
@@ -864,8 +866,8 @@ def segment_anomaly_interval(scaling_data, start_idx, end_idx, min_gap=None):
     if segment_start is not None:
         segment_end = end_idx
         seg_deviation = deviation[segment_start:segment_end+1]
-        seg_base_scores = np.where(seg_deviation > config.MAGNITUDE_THRESHOLD,
-                                   seg_deviation - config.MAGNITUDE_THRESHOLD,
+        seg_base_scores = np.where(seg_deviation > threshold_for_segments,
+                                   seg_deviation - threshold_for_segments,
                                    0)
         seg_scores = seg_base_scores * (1 + config.LAMBDA_SCORE * seg_base_scores)
         segment_score = np.sum(seg_scores)
@@ -1024,28 +1026,36 @@ def demonstrate_anomaly_detection(df, model, scaler, feature_cols, kmeans_model)
     X_demo_reshaped = X_demo_scaled.reshape((X_demo_scaled.shape[0], 1, X_demo_scaled.shape[1]))
     
     forecast = model.predict(X_demo_reshaped, verbose=0).flatten()
+    actual_load = demo_period['load'].values.astype(np.float32)
+    actual_with_anomaly = actual_load.copy()
     
     print(f"\nOriginal forecast - Mean: {np.mean(forecast):.2f} MWh, Std: {np.std(forecast):.2f} MWh")
+    print(f"Original actual load - Mean: {np.mean(actual_load):.2f} MWh, Std: {np.std(actual_load):.2f} MWh")
     
-    # INJECT ANOMALY: Multiply load by 1.2 for a 10-hour window
+    # INJECT ANOMALY: Multiply actual load by 1.2 for a 10-hour window
     anomaly_start = 50
     anomaly_end = 60
-    forecast_with_anomaly = forecast.copy()
-    forecast_with_anomaly[anomaly_start:anomaly_end] *= 1.2
+    actual_with_anomaly[anomaly_start:anomaly_end] *= 1.2
     
     print(f"\n*** INJECTING ANOMALY ***")
     print(f"Anomaly injected from hour {anomaly_start} to {anomaly_end} (10 hours)")
     print(f"Injected at timestamps: {demo_period.index[anomaly_start]} to {demo_period.index[anomaly_end-1]}")
     print(f"Multiplier: 1.2x")
     
-    # Get benchmark for the period
-    benchmark = get_benchmark_for_period(kmeans_model, forecast_with_anomaly)
+    # Get benchmark for the period (based on forecast history)
+    benchmark = get_benchmark_for_period(kmeans_model, forecast)
     
     print(f"\nBenchmark - Mean: {np.mean(benchmark):.2f} MWh, Std: {np.std(benchmark):.2f} MWh")
     
     # Calculate scaling data
     # Add small epsilon to avoid division by zero
-    scaling_data = forecast_with_anomaly / (benchmark + 1e-6)
+    scaling_reference = getattr(config, 'SCALING_REFERENCE', 'forecast').lower()
+    if scaling_reference == 'benchmark':
+        reference_series = benchmark
+    else:
+        reference_series = forecast
+    epsilon = getattr(config, 'SCALING_EPSILON', 1e-6)
+    scaling_data = actual_with_anomaly / (reference_series + epsilon)
     
     print(f"Scaling data - Mean: {np.mean(scaling_data):.4f}, Std: {np.std(scaling_data):.4f}")
     

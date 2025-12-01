@@ -304,33 +304,54 @@ def get_injected_attacks():
     """Get list of all injected attacks (including completed ones) with timestamps."""
     all_attacks = []
     
+    # Try to get timestamps from simulator data first
+    simulator_data = None
     if simulation_controller.simulator and simulation_controller.simulator.data is not None:
-        for attack in simulation_controller.all_injected_attacks:
-            try:
-                # Calculate when attack actually occurred
-                injection_hour = attack.get('injection_hour', 0)
-                attack_start_hour = injection_hour + attack['start_hour']
-                attack_end_hour = attack_start_hour + attack['duration']
-                
-                # Get timestamps from simulator data
-                if 0 <= attack_start_hour < len(simulation_controller.simulator.data.index):
-                    start_time = simulation_controller.simulator.data.index[attack_start_hour]
-                    end_idx = min(attack_end_hour, len(simulation_controller.simulator.data.index) - 1)
+        simulator_data = simulation_controller.simulator.data
+    
+    # Fallback: try to get timestamps from data_store
+    data_store_timestamps = list(data_store.timestamps) if len(data_store.timestamps) > 0 else None
+    
+    for attack in simulation_controller.all_injected_attacks:
+        try:
+            # Calculate when attack actually occurred
+            injection_hour = attack.get('injection_hour', 0)
+            attack_start_hour = injection_hour + attack['start_hour']
+            attack_end_hour = attack_start_hour + attack['duration']
+            
+            start_time = None
+            end_time = None
+            
+            # Try simulator data first
+            if simulator_data is not None:
+                if 0 <= attack_start_hour < len(simulator_data.index):
+                    start_time = simulator_data.index[attack_start_hour]
+                    end_idx = min(attack_end_hour, len(simulator_data.index) - 1)
                     if end_idx >= attack_start_hour:
-                        end_time = simulation_controller.simulator.data.index[end_idx]
-                        
-                        all_attacks.append({
-                            'type': attack['type'],
-                            'start_hour': attack['start_hour'],
-                            'duration': attack['duration'],
-                            'magnitude': attack['magnitude'],
-                            'start_time': str(start_time),
-                            'end_time': str(end_time),
-                            'injected_at': str(attack.get('injected_at', ''))
-                        })
-            except Exception as e:
-                print(f"Error processing attack: {e}")
-                continue
+                        end_time = simulator_data.index[end_idx]
+            
+            # Fallback to data_store timestamps
+            if start_time is None and data_store_timestamps is not None:
+                if 0 <= attack_start_hour < len(data_store_timestamps):
+                    start_time = data_store_timestamps[attack_start_hour]
+                    end_idx = min(attack_end_hour, len(data_store_timestamps) - 1)
+                    if end_idx >= attack_start_hour:
+                        end_time = data_store_timestamps[end_idx]
+            
+            # If we have valid timestamps, add the attack
+            if start_time is not None and end_time is not None:
+                all_attacks.append({
+                    'type': attack['type'],
+                    'start_hour': attack['start_hour'],
+                    'duration': attack['duration'],
+                    'magnitude': attack['magnitude'],
+                    'start_time': str(start_time),
+                    'end_time': str(end_time),
+                    'injected_at': str(attack.get('injected_at', ''))
+                })
+        except Exception as e:
+            print(f"Error processing attack: {e}")
+            continue
     
     return jsonify({
         'status': 'success',

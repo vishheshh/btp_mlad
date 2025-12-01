@@ -108,6 +108,9 @@ class RealTimeDetector:
         # Detection tracking
         self.last_detection_time = None
         self.detection_latency_history = deque(maxlen=100)
+        self.instant_counter = 0
+        self.instant_start_idx = None
+        self.last_emergency_alert_time = None
 
     def process_hourly_data(self, forecast: float, benchmark: float,
                            actual_load: float, timestamp: pd.Timestamp) -> dict:
@@ -123,8 +126,14 @@ class RealTimeDetector:
         Returns:
             Dictionary with scaling ratio, detection results, and alerts
         """
-        # Calculate scaling ratio (forecast/benchmark)
-        scaling_ratio = forecast / (benchmark + 1e-6)
+        # Calculate scaling ratio using actual load against configured reference
+        scaling_reference = getattr(config, 'SCALING_REFERENCE', 'forecast').lower()
+        if scaling_reference == 'benchmark':
+            reference_value = benchmark
+        else:
+            reference_value = forecast
+        epsilon = getattr(config, 'SCALING_EPSILON', 1e-6)
+        scaling_ratio = actual_load / (reference_value + epsilon)
 
         # Calculate deviation
         deviation = abs(scaling_ratio - 1.0)
@@ -162,8 +171,12 @@ class RealTimeDetector:
         detections = []
         alerts = []
         
+        instant_detection = self._check_instant_alert(deviation)
+        if instant_detection:
+            detections.append(instant_detection)
+        
         if len(self.detection_window) >= config.MIN_ANOMALY_DURATION:
-            detections = self.run_detection()
+            detections.extend(self.run_detection())
             alerts = self.generate_alerts(detections)
 
         return {
@@ -219,6 +232,43 @@ class RealTimeDetector:
         # Note: detections are already relative to the window
         return detections
 
+    def _check_instant_alert(self, deviation: float) -> Optional[Dict]:
+        """
+        Check if deviation exceeds the instant alert threshold for the required duration.
+        """
+        threshold = getattr(config, 'INSTANT_ALERT_THRESHOLD', None)
+        confirmation_hours = getattr(config, 'INSTANT_ALERT_CONFIRMATION_HOURS', 0)
+        
+        if threshold is None or confirmation_hours <= 0:
+            return None
+        
+        current_idx = len(self.detection_window) - 1
+        if current_idx < 0:
+            return None
+        
+        if deviation >= threshold:
+            if self.instant_counter == 0:
+                self.instant_start_idx = current_idx
+            self.instant_counter += 1
+        else:
+            self.instant_counter = 0
+            self.instant_start_idx = None
+            return None
+        
+        if self.instant_counter >= confirmation_hours and self.instant_start_idx is not None:
+            start_idx = max(0, current_idx - confirmation_hours + 1)
+            detection = {
+                'start': start_idx,
+                'end': current_idx,
+                'method': 'INSTANT',
+                'peak_deviation': deviation
+            }
+            self.instant_counter = 0
+            self.instant_start_idx = None
+            return detection
+        
+        return None
+
     def generate_alerts(self, detections: List[Dict]) -> List[Alert]:
         """
         Generate alerts from detections.
@@ -245,6 +295,7 @@ class RealTimeDetector:
             
             # Determine severity based on method and scores
             severity = self._determine_severity(det)
+            severity = self._apply_emergency_cooldown(severity, start_time)
             
             # Check if this overlaps with existing active alerts
             is_new = True
@@ -291,6 +342,29 @@ class RealTimeDetector:
         
         return alerts
 
+    def _apply_emergency_cooldown(self, severity: str, timestamp: pd.Timestamp) -> str:
+        """
+        Prevent emergency alert spam by enforcing a cooldown window.
+        """
+        if severity != Alert.SEVERITY_EMERGENCY:
+            return severity
+        
+        cooldown_hours = getattr(config, 'EMERGENCY_COOLDOWN_HOURS', 0)
+        if cooldown_hours <= 0:
+            self.last_emergency_alert_time = timestamp
+            return severity
+        
+        if self.last_emergency_alert_time is None:
+            self.last_emergency_alert_time = timestamp
+            return severity
+        
+        elapsed_hours = (timestamp - self.last_emergency_alert_time).total_seconds() / 3600
+        if elapsed_hours < cooldown_hours:
+            return Alert.SEVERITY_HIGH
+        
+        self.last_emergency_alert_time = timestamp
+        return severity
+
     def _determine_severity(self, detection: Dict) -> str:
         """
         Determine alert severity based on detection characteristics.
@@ -302,9 +376,9 @@ class RealTimeDetector:
             Severity level string
         """
         method = detection.get('method', 'DP')
+        peak_deviation = detection.get('peak_deviation')
         
-        # Emergency mode check
-        if len(self.detection_window) > 0:
+        if peak_deviation is None and len(self.detection_window) > 0:
             start_idx = detection['start']
             end_idx = detection['end']
             if start_idx < len(self.detection_window) and end_idx < len(self.detection_window):
@@ -312,10 +386,16 @@ class RealTimeDetector:
                     self.detection_window[i]['scaling_ratio']
                     for i in range(start_idx, min(end_idx + 1, len(self.detection_window)))
                 ]
-                max_deviation = max([abs(r - 1.0) for r in scaling_ratios])
-                
-                if max_deviation >= config.EMERGENCY_THRESHOLD:
-                    return Alert.SEVERITY_EMERGENCY
+                peak_deviation = max([abs(r - 1.0) for r in scaling_ratios])
+        
+        if peak_deviation is not None and peak_deviation >= config.EMERGENCY_THRESHOLD:
+            return Alert.SEVERITY_EMERGENCY
+        
+        if method == 'INSTANT':
+            if peak_deviation is not None and peak_deviation >= config.MAGNITUDE_THRESHOLD:
+                return Alert.SEVERITY_HIGH
+            else:
+                return Alert.SEVERITY_MEDIUM
         
         # Determine severity based on method and scores
         if method == 'BOTH':

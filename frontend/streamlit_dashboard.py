@@ -1,5 +1,14 @@
 """
 Streamlit Dashboard - Real-time visualization for power grid protection system
+
+Architecture:
+- LIVE MODE: Fast HTTP polling with minimal UI (during simulation)
+- ANALYSIS MODE: Full charts and detailed analysis (after simulation stops)
+
+This solves the "laggy updates" problem by:
+1. Using fast polling (1 second) with minimal UI during simulation
+2. Rendering only essential metrics during live mode
+3. Deferring heavy chart rendering until simulation stops
 """
 import streamlit as st
 import pandas as pd
@@ -25,7 +34,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Initialize session state for live data
+if 'live_data' not in st.session_state:
+    st.session_state.live_data = {
+        'hours_processed': 0,
+        'recent_actuals': [],
+        'recent_forecasts': [],
+        'recent_timestamps': [],
+        'alerts_count': 0,
+        'last_timestamp': None
+    }
+
+# Custom CSS with live mode styling
 st.markdown("""
 <style>
     .main-header {
@@ -34,50 +54,57 @@ st.markdown("""
         color: #1f77b4;
         margin-bottom: 1rem;
     }
-    .alert-high {
-        background-color: #ff6b6b;
-        color: white;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem 0;
+    .live-indicator {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        background-color: #00ff00;
+        border-radius: 50%;
+        margin-right: 8px;
+        animation: pulse 1s infinite;
     }
-    .alert-medium {
-        background-color: #ffa94d;
-        color: white;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem 0;
+    @keyframes pulse {
+        0% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 0, 0.7); }
+        70% { opacity: 0.7; box-shadow: 0 0 0 10px rgba(0, 255, 0, 0); }
+        100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 0, 0); }
     }
-    .alert-low {
-        background-color: #51cf66;
+    .live-metric-card {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border-radius: 10px;
+        padding: 15px;
         color: white;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem 0;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        margin-bottom: 10px;
     }
-    .alert-emergency {
-        background-color: #c92a2a;
-        color: white;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem 0;
+    .live-metric-value {
+        font-size: 2rem;
         font-weight: bold;
+        color: #00d4ff;
     }
+    .live-metric-label {
+        font-size: 0.85rem;
+        color: #888;
+        margin-top: 5px;
+    }
+    .alert-high { background-color: #ff6b6b; color: white; padding: 0.5rem; border-radius: 0.25rem; margin: 0.25rem 0; }
+    .alert-medium { background-color: #ffa94d; color: white; padding: 0.5rem; border-radius: 0.25rem; margin: 0.25rem 0; }
+    .alert-low { background-color: #51cf66; color: white; padding: 0.5rem; border-radius: 0.25rem; margin: 0.25rem 0; }
+    .alert-emergency { background-color: #c92a2a; color: white; padding: 0.5rem; border-radius: 0.25rem; margin: 0.25rem 0; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 
-def fetch_api_data(endpoint, params=None):
-    """Fetch data from API endpoint."""
+def fetch_api_data(endpoint, params=None, timeout=2):
+    """Fetch data from API endpoint with short timeout for live mode."""
     try:
         url = f"{API_BASE_URL}/{endpoint}"
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             return response.json()
         else:
             return None
     except Exception as e:
-        st.error(f"Error fetching {endpoint}: {e}")
         return None
 
 
@@ -93,6 +120,385 @@ def post_api_data(endpoint, data=None):
     except Exception as e:
         st.error(f"Error posting to {endpoint}: {e}")
         return None
+
+
+def create_mini_live_chart(recent_actuals, recent_forecasts, recent_scaling_ratios=None):
+    """Create a lightweight mini-chart for live mode showing ML model response."""
+    if len(recent_actuals) < 2:
+        return None
+    
+    fig = go.Figure()
+    
+    # Use simple index for x-axis (faster than parsing timestamps)
+    x_vals = list(range(len(recent_actuals)))
+    
+    # Forecast - dashed line (draw first so actual is on top)
+    fig.add_trace(go.Scatter(
+        x=x_vals,
+        y=recent_forecasts,
+        name='ML Forecast',
+        line=dict(color='#00ff88', width=2, dash='dash'),
+        mode='lines',
+        hovertemplate='Forecast: %{y:.1f} MWh<extra></extra>'
+    ))
+    
+    # Actual load - solid line
+    fig.add_trace(go.Scatter(
+        x=x_vals,
+        y=recent_actuals,
+        name='Actual Load',
+        line=dict(color='#00d4ff', width=2),
+        mode='lines',
+        hovertemplate='Actual: %{y:.1f} MWh<extra></extra>'
+    ))
+    
+    # Highlight deviation areas (where actual differs significantly from forecast)
+    if recent_scaling_ratios:
+        for i, ratio in enumerate(recent_scaling_ratios):
+            deviation = abs(ratio - 1.0)
+            if deviation > 0.09:  # Anomaly threshold
+                # Color based on severity
+                if deviation > 0.40:
+                    color = 'rgba(220, 20, 60, 0.4)'  # Emergency - crimson
+                elif deviation > 0.25:
+                    color = 'rgba(255, 99, 71, 0.3)'  # High - tomato
+                elif deviation > 0.15:
+                    color = 'rgba(255, 165, 0, 0.3)'  # Medium - orange
+                else:
+                    color = 'rgba(144, 238, 144, 0.3)'  # Low - light green
+                
+                fig.add_vrect(
+                    x0=i-0.5, x1=i+0.5,
+                    fillcolor=color, layer="below",
+                    line_width=0
+                )
+    
+    fig.update_layout(
+        height=250,
+        margin=dict(l=40, r=10, t=10, b=30),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(26,26,46,0.5)',
+        xaxis=dict(
+            showgrid=False,
+            showticklabels=True,
+            tickfont=dict(color='#888', size=9),
+            title=dict(text="Hours", font=dict(color='#888', size=10)),
+            zeroline=False
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.1)',
+            showticklabels=True,
+            tickfont=dict(color='#888', size=10),
+            title=dict(text="Load (MWh)", font=dict(color='#888', size=10)),
+            zeroline=False
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(color='#888', size=10)
+        ),
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
+def render_live_mode(status_data):
+    """
+    Render minimal live mode UI during simulation.
+    Uses fast HTTP polling instead of WebSocket for reliability.
+    """
+    # Header with live indicator
+    st.markdown("""
+        <div style="display: flex; align-items: center; margin-bottom: 15px;">
+            <span class="live-indicator"></span>
+            <span style="font-size: 1.5rem; font-weight: bold; color: #00ff00;">LIVE SIMULATION</span>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Fetch latest data from API
+    forecast_data = fetch_api_data("forecast", {"hours": 50}, timeout=2)
+    alerts_data = fetch_api_data("alerts", {"limit": 10}, timeout=2)
+    
+    # Get ACTUAL total hours from status (not just the 50 we fetched)
+    total_hours = 0
+    if status_data and status_data.get('data_store'):
+        total_hours = status_data['data_store'].get('total_hours', 0)
+    
+    # Extract latest metrics
+    recent_scaling_ratios = []
+    if forecast_data and forecast_data.get('data'):
+        data_list = forecast_data['data']
+        
+        if len(data_list) > 0:
+            latest = data_list[-1]
+            actual = float(latest.get('actual', 0))
+            forecast = float(latest.get('forecast', 0))
+            scaling_ratio = float(latest.get('scaling_ratio', 1.0))
+            timestamp = latest.get('timestamp', '')
+            
+            # Update session state
+            st.session_state.live_data['hours_processed'] = total_hours
+            st.session_state.live_data['last_timestamp'] = timestamp
+            
+            # Build rolling window from data (including scaling ratios for anomaly highlighting)
+            recent_actuals = [float(d.get('actual', 0)) for d in data_list[-50:]]
+            recent_forecasts = [float(d.get('forecast', 0)) for d in data_list[-50:]]
+            recent_scaling_ratios = [float(d.get('scaling_ratio', 1.0)) for d in data_list[-50:]]
+        else:
+            actual = 0
+            forecast = 0
+            scaling_ratio = 1.0
+            timestamp = ''
+            recent_actuals = []
+            recent_forecasts = []
+            recent_scaling_ratios = []
+    else:
+        actual = 0
+        forecast = 0
+        scaling_ratio = 1.0
+        timestamp = st.session_state.live_data.get('last_timestamp', '')
+        recent_actuals = []
+        recent_forecasts = []
+        recent_scaling_ratios = []
+    
+    # Use total_hours from status, fallback to session state
+    hours_processed = total_hours if total_hours > 0 else st.session_state.live_data.get('hours_processed', 0)
+    
+    # Get alerts count
+    alerts_count = alerts_data.get('count', 0) if alerts_data else 0
+    
+    # Live metrics row - 5 columns
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown(f"""
+            <div class="live-metric-card">
+                <div class="live-metric-value">{hours_processed}</div>
+                <div class="live-metric-label">Hours Processed</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+            <div class="live-metric-card">
+                <div class="live-metric-value">{actual:.1f}</div>
+                <div class="live-metric-label">Current Load (MWh)</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+            <div class="live-metric-card">
+                <div class="live-metric-value">{forecast:.1f}</div>
+                <div class="live-metric-label">Forecast (MWh)</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        deviation = abs(scaling_ratio - 1.0) * 100
+        deviation_color = "#00ff00" if deviation < 5 else ("#ffa500" if deviation < 10 else "#ff0000")
+        st.markdown(f"""
+            <div class="live-metric-card">
+                <div class="live-metric-value" style="color: {deviation_color}">{deviation:.1f}%</div>
+                <div class="live-metric-label">Deviation</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col5:
+        alert_color = "#00ff00" if alerts_count == 0 else "#ff0000"
+        st.markdown(f"""
+            <div class="live-metric-card">
+                <div class="live-metric-value" style="color: {alert_color}">{alerts_count}</div>
+                <div class="live-metric-label">Alerts</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Mini live chart with ML model response
+    st.subheader("📈 ML Model Response - Live (Last 50 Hours)")
+    st.caption("🟢 Green line = ML Forecast | 🔵 Blue line = Actual Load | Colored regions = Detected anomalies")
+    
+    if len(recent_actuals) > 1:
+        mini_chart = create_mini_live_chart(recent_actuals, recent_forecasts, recent_scaling_ratios)
+        if mini_chart:
+            st.plotly_chart(mini_chart, use_container_width=True)
+    else:
+        st.info("⏳ Collecting data... Chart will appear after a few hours of simulation.")
+    
+    # Current timestamp and progress
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        if timestamp:
+            st.caption(f"📅 Current simulation time: **{timestamp}**")
+    
+    with col_right:
+        # Simulation progress
+        if status_data and status_data.get('simulation', {}).get('progress'):
+            progress = status_data['simulation']['progress']
+            progress_pct = progress.get('progress', 0)
+            current_idx = progress.get('current_index', 0)
+            total = progress.get('total', 1)
+            st.progress(progress_pct / 100)
+            st.caption(f"Progress: {current_idx:,} / {total:,} hours ({progress_pct:.1f}%)")
+    
+    # === MODEL REACTION PANEL ===
+    st.markdown("---")
+    st.subheader("🧠 Model Reaction Monitor")
+    
+    # Get active attacks info
+    active_attacks_data = fetch_api_data("simulation/active_attacks", timeout=2)
+    active_attacks = active_attacks_data.get('active_attacks', []) if active_attacks_data else []
+    
+    # Calculate max deviation from recent data (last 10 hours) for better detection
+    max_recent_deviation = deviation  # Start with current
+    if forecast_data and forecast_data.get('data'):
+        recent_data = forecast_data['data'][-10:]  # Last 10 hours
+        for d in recent_data:
+            d_ratio = float(d.get('scaling_ratio', 1.0))
+            d_dev = abs(d_ratio - 1.0) * 100
+            if d_dev > max_recent_deviation:
+                max_recent_deviation = d_dev
+    
+    # Use max recent deviation for status display
+    display_deviation = max_recent_deviation
+    
+    # Create 3 columns for model reaction display
+    react_col1, react_col2, react_col3 = st.columns(3)
+    
+    with react_col1:
+        # Current Detection Status - matches config.py thresholds
+        # EMERGENCY_THRESHOLD = 0.50 (50%)
+        if display_deviation > 50:
+            status_icon = "🔴"
+            status_text = "EMERGENCY"
+            status_color = "#DC143C"
+            status_desc = "INSTANT ALERT - Grid threat!"
+        elif display_deviation > 40:
+            status_icon = "🟠"
+            status_text = "HIGH"
+            status_color = "#FF6347"
+            status_desc = "Strong attack detected"
+        elif display_deviation > 25:
+            status_icon = "🟡"
+            status_text = "MEDIUM"
+            status_color = "#FFA500"
+            status_desc = "Medium attack detected"
+        elif display_deviation > 9:
+            status_icon = "🟢"
+            status_text = "LOW"
+            status_color = "#90EE90"
+            status_desc = "Weak attack detected"
+        else:
+            status_icon = "✅"
+            status_text = "NORMAL"
+            status_color = "#00ff00"
+            status_desc = "Below 9% threshold"
+        
+        st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
+                        border-radius: 10px; padding: 15px; text-align: center;
+                        border-left: 4px solid {status_color};">
+                <div style="font-size: 2rem;">{status_icon}</div>
+                <div style="font-size: 1.2rem; font-weight: bold; color: {status_color};">{status_text}</div>
+                <div style="font-size: 0.8rem; color: #888;">{status_desc}</div>
+                <div style="font-size: 0.75rem; color: #666; margin-top: 5px;">Max: {display_deviation:.1f}%</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with react_col2:
+        # Attack Status
+        if active_attacks:
+            attack = active_attacks[0]  # Show first active attack
+            attack_type = attack.get('type', 'UNKNOWN')
+            attack_mag = attack.get('magnitude', 0)
+            st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #2d1b4e 0%, #1a1a2e 100%); 
+                            border-radius: 10px; padding: 15px; text-align: center;
+                            border-left: 4px solid #9932CC;">
+                    <div style="font-size: 2rem;">💉</div>
+                    <div style="font-size: 1.2rem; font-weight: bold; color: #9932CC;">ATTACK ACTIVE</div>
+                    <div style="font-size: 0.9rem; color: #DDA0DD;">{attack_type}</div>
+                    <div style="font-size: 0.8rem; color: #888;">Magnitude: {attack_mag:.2f}</div>
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            # Check if there are any alerts (attack might have just ended)
+            has_recent_alerts = alerts_count > 0
+            if has_recent_alerts:
+                st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #2d1b2e 0%, #1a1a2e 100%); 
+                                border-radius: 10px; padding: 15px; text-align: center;
+                                border-left: 4px solid #FF69B4;">
+                        <div style="font-size: 2rem;">⚠️</div>
+                        <div style="font-size: 1.2rem; font-weight: bold; color: #FF69B4;">ANOMALY</div>
+                        <div style="font-size: 0.8rem; color: #888;">{alerts_count} alert(s) raised</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                    <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
+                                border-radius: 10px; padding: 15px; text-align: center;
+                                border-left: 4px solid #444;">
+                        <div style="font-size: 2rem;">🛡️</div>
+                        <div style="font-size: 1.2rem; font-weight: bold; color: #888;">NO ATTACK</div>
+                        <div style="font-size: 0.8rem; color: #666;">System monitoring...</div>
+                    </div>
+                """, unsafe_allow_html=True)
+    
+    with react_col3:
+        # Detection Method Active - matches config.py thresholds
+        if display_deviation > 9:
+            # Show which detection method caught it
+            if display_deviation > 50:
+                method = "Emergency Mode"
+            elif display_deviation > 25:
+                method = "DP + Statistical"
+            else:
+                method = "DP Algorithm"
+            st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #1a2e1a 0%, #16213e 100%); 
+                            border-radius: 10px; padding: 15px; text-align: center;
+                            border-left: 4px solid #32CD32;">
+                    <div style="font-size: 2rem;">🎯</div>
+                    <div style="font-size: 1.2rem; font-weight: bold; color: #32CD32;">DETECTED</div>
+                    <div style="font-size: 0.9rem; color: #90EE90;">{method}</div>
+                    <div style="font-size: 0.8rem; color: #888;">Deviation: {display_deviation:.1f}%</div>
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+                <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
+                            border-radius: 10px; padding: 15px; text-align: center;
+                            border-left: 4px solid #444;">
+                    <div style="font-size: 2rem;">👁️</div>
+                    <div style="font-size: 1.2rem; font-weight: bold; color: #888;">MONITORING</div>
+                    <div style="font-size: 0.8rem; color: #666;">Awaiting anomaly...</div>
+                </div>
+            """, unsafe_allow_html=True)
+    
+    # Recent alerts (compact view)
+    if alerts_data and alerts_data.get('alerts'):
+        alerts = alerts_data['alerts'][-5:]  # Last 5 alerts
+        if alerts:
+            st.markdown("---")
+            st.subheader("🚨 Recent Alerts")
+            for alert in reversed(alerts):
+                severity = alert.get('severity', 'LOW')
+                method = alert.get('method', 'Unknown')
+                severity_icons = {'LOW': '🟢', 'MEDIUM': '🟡', 'HIGH': '🟠', 'EMERGENCY': '🔴'}
+                icon = severity_icons.get(severity, '🟢')
+                st.caption(f"{icon} **{severity}** via {method} at {alert.get('start_time', 'N/A')}")
+    
+    # Speed context info
+    current_speed = status_data.get('simulation', {}).get('speed', 100) if status_data else 100
+    st.info(f"💡 **Live Mode** @ {current_speed}x speed (~{int(current_speed)} hrs/sec) | Refreshing every 1 second | Full analysis available when simulation stops.")
 
 
 def create_attack_focused_chart(data_df, active_attacks):
@@ -165,7 +571,7 @@ def create_attack_focused_chart(data_df, active_attacks):
         marker=dict(size=6)
     ))
     
-    # First, identify attack regions
+    # Identify attack regions
     attack_regions_list = []
     for attack in active_attacks:
         try:
@@ -175,7 +581,7 @@ def create_attack_focused_chart(data_df, active_attacks):
         except:
             pass
     
-    # Highlight detected anomalies FIRST (red) - but exclude attack regions
+    # Highlight detected anomalies (red)
     deviation = np.abs(attack_data['scaling_ratio'] - 1.0)
     anomaly_mask = deviation > 0.09
     
@@ -195,19 +601,16 @@ def create_attack_focused_chart(data_df, active_attacks):
         if in_anomaly:
             anomaly_regions.append((start_idx, len(anomaly_mask)-1))
         
-        # Add red regions for detected anomalies - only if not in attack region
         for start_idx, end_idx in anomaly_regions:
             region_start = attack_timestamps.iloc[start_idx]
             region_end = attack_timestamps.iloc[end_idx]
             
-            # Check if this region overlaps with any attack region
             is_in_attack_region = False
             for attack_start, attack_end in attack_regions_list:
                 if not (region_end < attack_start or region_start > attack_end):
                     is_in_attack_region = True
                     break
             
-            # Only show red if not in attack region
             if not is_in_attack_region:
                 fig.add_vrect(
                     x0=region_start,
@@ -222,7 +625,7 @@ def create_attack_focused_chart(data_df, active_attacks):
                     annotation_font_color="red"
                 )
     
-    # Highlight each attack period with magnitude-based color intensity (lighter for visibility) - DRAW LAST so purple is visible
+    # Highlight attack periods (purple)
     for idx, attack in enumerate(active_attacks):
         try:
             attack_start = pd.to_datetime(attack.get('start_time'))
@@ -230,25 +633,21 @@ def create_attack_focused_chart(data_df, active_attacks):
             magnitude = attack.get('magnitude', 0.1)
             attack_type = attack.get('type', 'ATTACK')
             
-            # Calculate color intensity based on magnitude (more visible)
             if magnitude <= 0.5:
-                opacity = 0.15 + (magnitude / 0.5) * 0.15  # 0.15 to 0.3
+                opacity = 0.15 + (magnitude / 0.5) * 0.15
             elif magnitude <= 1.0:
-                opacity = 0.3 + ((magnitude - 0.5) / 0.5) * 0.2  # 0.3 to 0.5
+                opacity = 0.3 + ((magnitude - 0.5) / 0.5) * 0.2
             else:
-                opacity = min(0.5 + ((magnitude - 1.0) / 2.0) * 0.2, 0.7)  # 0.5 to 0.7 (capped)
+                opacity = min(0.5 + ((magnitude - 1.0) / 2.0) * 0.2, 0.7)
             
-            # Base purple color with variable opacity
             color = f"rgba(138, 43, 226, {opacity})"
-            
-            # Line width also varies with magnitude
             line_width = max(3, int(3 + magnitude * 2))
             
             fig.add_vrect(
                 x0=attack_start,
                 x1=attack_end,
                 fillcolor=color,
-                layer="below",  # Below lines but above red regions
+                layer="below",
                 line_width=line_width,
                 line_color="purple",
                 line_dash="dash",
@@ -258,28 +657,21 @@ def create_attack_focused_chart(data_df, active_attacks):
                 annotation_font_color="purple"
             )
             
-            # Add attack type marker at midpoint for visibility
             mid_time = attack_start + (attack_end - attack_start) / 2
             mid_idx = attack_timestamps.searchsorted(mid_time)
             if mid_idx < len(attack_data):
                 mid_actual = attack_data.iloc[mid_idx]['actual']
-                # Add marker for attack type
                 fig.add_trace(go.Scatter(
                     x=[mid_time],
                     y=[mid_actual],
                     mode='markers+text',
-                    marker=dict(
-                        symbol='diamond',
-                        size=18,
-                        color='purple',
-                        line=dict(width=3, color='white')
-                    ),
+                    marker=dict(symbol='diamond', size=18, color='purple', line=dict(width=3, color='white')),
                     text=[f"{attack_type}"],
                     textposition="top center",
                     textfont=dict(color='purple', size=11, family='Arial Black'),
                     name=f"Attack: {attack_type}",
                     showlegend=False,
-                    hovertemplate=f"<b>{attack_type} Attack</b><br>Magnitude: {magnitude:.2f}<br>Duration: {attack.get('duration', 0)}h<extra></extra>"
+                    hovertemplate=f"<b>{attack_type} Attack</b><br>Magnitude: {magnitude:.2f}<extra></extra>"
                 ))
         except:
             continue
@@ -297,51 +689,51 @@ def create_attack_focused_chart(data_df, active_attacks):
     return fig
 
 
-def create_load_chart(data_df, hours=24, active_attacks=None):
+def get_severity_color(deviation_pct):
     """
-    Create real-time load chart with multiple series.
+    Get color based on deviation severity.
     
-    Args:
-        data_df: DataFrame with timestamp, actual, forecast, benchmark, scaling_ratio
-        hours: Number of hours (ignored if data_df already filtered)
-        active_attacks: List of active attack dictionaries
+    Matches config.py thresholds:
+    - EMERGENCY: >50% deviation → Deep Red (INSTANT ALERT)
+    - HIGH: 40-50% deviation → Red-Orange (Strong attack)
+    - MEDIUM: 25-40% deviation → Orange (Medium attack)
+    - LOW: 9-25% deviation → Light Green (Weak attack)
     """
+    if deviation_pct < 0.25:  # LOW (9-25%)
+        return "rgba(144, 238, 144, 0.3)", "#90EE90", "LOW"  # Light green
+    elif deviation_pct < 0.40:  # MEDIUM (25-40%)
+        return "rgba(255, 165, 0, 0.3)", "#FFA500", "MEDIUM"  # Orange
+    elif deviation_pct < 0.50:  # HIGH (40-50%)
+        return "rgba(255, 99, 71, 0.4)", "#FF6347", "HIGH"  # Tomato red
+    else:  # EMERGENCY (>50%)
+        return "rgba(220, 20, 60, 0.5)", "#DC143C", "EMERGENCY"  # Crimson
+
+
+def create_load_chart(data_df, hours=24, active_attacks=None):
+    """Create real-time load chart with multiple series and severity-based anomaly colors."""
     if data_df is None or len(data_df) == 0:
         return None
     
     fig = go.Figure()
     
-    # Convert timestamps
     timestamps = pd.to_datetime(data_df['timestamp'])
     
-    # Add actual load line
     fig.add_trace(go.Scatter(
-        x=timestamps,
-        y=data_df['actual'],
-        name='Actual Load',
-        line=dict(color='#1f77b4', width=2),
-        mode='lines'
+        x=timestamps, y=data_df['actual'],
+        name='Actual Load', line=dict(color='#1f77b4', width=2), mode='lines'
     ))
     
-    # Add forecast line
     fig.add_trace(go.Scatter(
-        x=timestamps,
-        y=data_df['forecast'],
-        name='Forecast',
-        line=dict(color='#2ca02c', width=2, dash='dash'),
-        mode='lines'
+        x=timestamps, y=data_df['forecast'],
+        name='Forecast', line=dict(color='#2ca02c', width=2, dash='dash'), mode='lines'
     ))
     
-    # Add benchmark line
     fig.add_trace(go.Scatter(
-        x=timestamps,
-        y=data_df['benchmark'],
-        name='Benchmark',
-        line=dict(color='#ff7f0e', width=2, dash='dot'),
-        mode='lines'
+        x=timestamps, y=data_df['benchmark'],
+        name='Benchmark', line=dict(color='#ff7f0e', width=2, dash='dot'), mode='lines'
     ))
     
-    # First, identify attack regions to exclude from red anomaly detection
+    # Attack regions (for exclusion from anomaly highlighting)
     attack_regions = []
     if active_attacks:
         for attack in active_attacks:
@@ -355,13 +747,12 @@ def create_load_chart(data_df, hours=24, active_attacks=None):
             except:
                 pass
     
-    # Highlight anomalous regions (where scaling ratio deviates significantly) - RED
-    # But exclude attack regions (they'll be purple)
+    # Anomaly regions with SEVERITY-BASED COLORS
     deviation = np.abs(data_df['scaling_ratio'] - 1.0)
-    anomaly_mask = deviation > 0.09
+    anomaly_mask = deviation > 0.09  # 9% threshold
     
     if anomaly_mask.any():
-        # Find continuous anomaly regions
+        # Find continuous anomaly regions with their max deviation
         anomaly_regions = []
         in_anomaly = False
         start_idx = None
@@ -371,38 +762,45 @@ def create_load_chart(data_df, hours=24, active_attacks=None):
                 start_idx = i
                 in_anomaly = True
             elif not is_anomaly and in_anomaly:
-                anomaly_regions.append((start_idx, i-1))
+                # Calculate max deviation in this region
+                max_dev = deviation.iloc[start_idx:i].max()
+                anomaly_regions.append((start_idx, i-1, max_dev))
                 in_anomaly = False
         
         if in_anomaly:
-            anomaly_regions.append((start_idx, len(anomaly_mask)-1))
+            max_dev = deviation.iloc[start_idx:].max()
+            anomaly_regions.append((start_idx, len(anomaly_mask)-1, max_dev))
         
-        # Add shaded regions for detected anomalies (RED) - only if not in attack region
-        for start_idx, end_idx in anomaly_regions:
+        # Draw anomaly regions with severity-based colors
+        for start_idx, end_idx, max_deviation in anomaly_regions:
             region_start = timestamps.iloc[start_idx]
             region_end = timestamps.iloc[end_idx]
             
-            # Check if this region overlaps with any attack region
+            # Check if in attack region (skip if so - attacks shown separately)
             is_in_attack_region = False
             for attack_start, attack_end in attack_regions:
                 if not (region_end < attack_start or region_start > attack_end):
                     is_in_attack_region = True
                     break
             
-            # Only show red if not in attack region
             if not is_in_attack_region:
+                fill_color, line_color, severity = get_severity_color(max_deviation)
+                
+                # Severity icons
+                severity_icons = {'LOW': '🟢', 'MEDIUM': '🟡', 'HIGH': '🟠', 'EMERGENCY': '🔴'}
+                icon = severity_icons.get(severity, '⚠️')
+                
                 fig.add_vrect(
-                    x0=region_start,
-                    x1=region_end,
-                    fillcolor="rgba(255, 0, 0, 0.2)",  # Red for detected anomalies
-                    layer="below",
-                    line_width=1,
-                    line_color="red",
-                    annotation_text="Detected Anomaly",
-                    annotation_position="top right"
+                    x0=region_start, x1=region_end,
+                    fillcolor=fill_color, layer="below",
+                    line_width=2, line_color=line_color,
+                    annotation_text=f"{icon} {severity}<br>{max_deviation*100:.1f}%",
+                    annotation_position="top right",
+                    annotation_font_size=9,
+                    annotation_font_color=line_color
                 )
     
-    # Highlight injected attack regions (purple) with magnitude-based intensity - DRAW LAST so it's on top
+    # Attack regions (purple with DOTTED BORDERS)
     if active_attacks:
         for attack in active_attacks:
             try:
@@ -411,160 +809,66 @@ def create_load_chart(data_df, hours=24, active_attacks=None):
                 magnitude = attack.get('magnitude', 0.1)
                 attack_type = attack.get('type', 'ATTACK')
                 
-                # Check if attack time is within chart range
                 if attack_start <= timestamps.iloc[-1] and attack_end >= timestamps.iloc[0]:
-                    # Clip to chart range
                     chart_start = max(attack_start, timestamps.iloc[0])
                     chart_end = min(attack_end, timestamps.iloc[-1])
                     
-                    # Calculate color intensity based on magnitude (lighter for better visibility)
                     if magnitude <= 0.5:
-                        opacity = 0.15 + (magnitude / 0.5) * 0.15  # 0.15 to 0.3 (more visible)
+                        opacity = 0.15 + (magnitude / 0.5) * 0.15
                     elif magnitude <= 1.0:
-                        opacity = 0.3 + ((magnitude - 0.5) / 0.5) * 0.2  # 0.3 to 0.5
+                        opacity = 0.3 + ((magnitude - 0.5) / 0.5) * 0.2
                     else:
-                        opacity = min(0.5 + ((magnitude - 1.0) / 2.0) * 0.2, 0.7)  # 0.5 to 0.7 (capped)
+                        opacity = min(0.5 + ((magnitude - 1.0) / 2.0) * 0.2, 0.7)
                     
-                    color = f"rgba(138, 43, 226, {opacity})"
-                    line_width = max(3, int(3 + magnitude * 2))
-                    
-                    # Add purple shaded region
+                    # Add shaded region with dotted border
                     fig.add_vrect(
-                        x0=chart_start,
-                        x1=chart_end,
-                        fillcolor=color,
-                        layer="below",  # Below lines but above red regions
-                        line_width=line_width,
-                        line_color="purple",
-                        line_dash="dash",
+                        x0=chart_start, x1=chart_end,
+                        fillcolor=f"rgba(138, 43, 226, {opacity})", layer="below",
+                        line_width=3, line_color="purple", line_dash="dot",
                         annotation_text=f"💉 {attack_type}<br>Mag: {magnitude:.2f}",
-                        annotation_position="top left",
-                        annotation_font_size=11,
-                        annotation_font_color="purple"
+                        annotation_position="top left", annotation_font_size=11, annotation_font_color="purple"
                     )
                     
-                    # Add attack type markers at start and midpoint for visibility
-                    mid_time = chart_start + (chart_end - chart_start) / 2
-                    mid_idx = timestamps.searchsorted(mid_time)
-                    if mid_idx < len(data_df):
-                        mid_actual = data_df.iloc[mid_idx]['actual']
-                        # Add marker for attack type
-                        fig.add_trace(go.Scatter(
-                            x=[mid_time],
-                            y=[mid_actual],
-                            mode='markers+text',
-                            marker=dict(
-                                symbol='diamond',
-                                size=15,
-                                color='purple',
-                                line=dict(width=2, color='white')
-                            ),
-                            text=[f"{attack_type}"],
-                            textposition="top center",
-                            textfont=dict(color='purple', size=10, family='Arial Black'),
-                            name=f"Attack: {attack_type}",
-                            showlegend=False,
-                            hovertemplate=f"<b>{attack_type} Attack</b><br>Magnitude: {magnitude:.2f}<extra></extra>"
-                        ))
-            except Exception as e:
-                pass  # Skip if timestamp conversion fails
+                    # Add vertical dotted lines at attack boundaries for visibility
+                    y_min = data_df['actual'].min() * 0.95
+                    y_max = data_df['actual'].max() * 1.05
+                    
+                    # Start boundary line
+                    fig.add_trace(go.Scatter(
+                        x=[chart_start, chart_start],
+                        y=[y_min, y_max],
+                        mode='lines',
+                        line=dict(color='purple', width=2, dash='dot'),
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
+                    
+                    # End boundary line
+                    fig.add_trace(go.Scatter(
+                        x=[chart_end, chart_end],
+                        y=[y_min, y_max],
+                        mode='lines',
+                        line=dict(color='purple', width=2, dash='dot'),
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
+            except:
+                pass
     
     fig.update_layout(
         title="Real-Time Load Monitoring",
-        xaxis_title="Time",
-        yaxis_title="Load (MWh)",
-        hovermode='x unified',
-        height=500,
+        xaxis_title="Time", yaxis_title="Load (MWh)",
+        hovermode='x unified', height=500,
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
     )
     
     return fig
 
 
-def main():
-    """Main dashboard function."""
-    # Header
+def render_analysis_mode(status_data):
+    """Render full analysis mode UI (when simulation is stopped)."""
     st.markdown('<div class="main-header">⚡ Power Grid Protection Dashboard</div>', unsafe_allow_html=True)
     
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Control Panel")
-        
-        # Simulation control
-        st.subheader("Simulation Control")
-        status_data = fetch_api_data("status")
-        
-        if status_data and status_data.get('simulation'):
-            sim_status = status_data['simulation']
-            
-            if sim_status.get('is_running'):
-                st.success("🟢 Simulation Running")
-                if st.button("⏹️ Stop Simulation"):
-                    result = post_api_data("simulation/stop")
-                    if result and result.get('status') == 'success':
-                        st.success("Simulation stopped")
-                        st.rerun()
-            else:
-                st.info("⚪ Simulation Stopped")
-                if st.button("▶️ Start Simulation"):
-                    speed = st.number_input("Speed (1x = real-time)", min_value=1.0, value=100.0, step=10.0)
-                    result = post_api_data("simulation/start", {"speed": speed})
-                    if result and result.get('status') == 'success':
-                        st.success("Simulation started")
-                        st.rerun()
-            
-            # Speed control
-            if sim_status.get('is_running'):
-                current_speed = sim_status.get('speed', 100.0)
-                new_speed = st.slider("Simulation Speed", min_value=1.0, max_value=1000.0, 
-                                     value=float(current_speed), step=10.0)
-                if new_speed != current_speed:
-                    post_api_data("simulation/speed", {"speed": new_speed})
-            
-            # Reset button
-            st.divider()
-            st.subheader("🔄 Reset")
-            if st.button("🗑️ Reset Simulation", help="Clear all data, attacks, and reset simulation state"):
-                if st.session_state.get('reset_confirmed', False):
-                    result = post_api_data("simulation/reset")
-                    if result and result.get('status') == 'success':
-                        st.success("✅ Simulation reset successfully!")
-                        st.session_state.reset_confirmed = False
-                        st.rerun()
-                    else:
-                        st.error("Failed to reset simulation")
-                else:
-                    st.session_state.reset_confirmed = True
-                    st.warning("⚠️ Click again to confirm reset (this will clear all data)")
-        
-        st.divider()
-        
-        # Attack injection
-        st.subheader("Attack Injection")
-        
-        attack_type = st.selectbox(
-            "Attack Type",
-            ["PULSE", "SCALING", "RAMPING", "RANDOM", "SMOOTH-CURVE", 
-             "POINT-BURST", "CONTEXTUAL-SEASONAL", "RAMPING-TYPE2"]
-        )
-        
-        attack_start = st.number_input("Start Hour (offset)", min_value=0, value=5)
-        attack_duration = st.number_input("Duration (hours)", min_value=1, value=2)
-        attack_magnitude = st.slider("Magnitude", min_value=0.1, max_value=2.0, value=0.2, step=0.1)
-        
-        if st.button("💉 Inject Attack"):
-            result = post_api_data("simulation/inject_attack", {
-                "type": attack_type,
-                "start_hour": attack_start,
-                "duration": attack_duration,
-                "magnitude": attack_magnitude
-            })
-            if result and result.get('status') == 'success':
-                st.success("Attack injected!")
-            else:
-                st.error("Failed to inject attack")
-    
-    # Main content
     # Status row
     col1, col2, col3, col4 = st.columns(4)
     
@@ -592,322 +896,366 @@ def main():
     
     st.divider()
     
-    # Get attacks for main chart visualization (use injected_attacks if simulation stopped)
-    if status_data and status_data.get('simulation', {}).get('is_running'):
-        active_attacks_data = fetch_api_data("simulation/active_attacks")
-        active_attacks = active_attacks_data.get('active_attacks', []) if active_attacks_data else []
-    else:
-        # When stopped, use all injected attacks
-        injected_attacks_data = fetch_api_data("simulation/injected_attacks")
-        active_attacks = injected_attacks_data.get('injected_attacks', []) if injected_attacks_data else []
+    # Get attacks
+    injected_attacks_data = fetch_api_data("simulation/injected_attacks")
+    active_attacks = injected_attacks_data.get('injected_attacks', []) if injected_attacks_data else []
     
-    # Attack-focused chart (separate, zoomed view) - ONLY SHOW WHEN SIMULATION IS STOPPED
-    if status_data and status_data.get('simulation'):
-        sim_status = status_data['simulation']
-        is_running = sim_status.get('is_running', False)
+    # Attack-focused chart with ML Model Response Analysis
+    if active_attacks:
+        st.header("🧠 ML Model Response to Attack Injection")
+        st.caption("📊 Analysis of how the ML model detected and responded to injected attacks")
         
-        # Only show attack view when simulation is stopped
-        if not is_running:
-            # Get all injected attacks (including completed ones)
-            injected_attacks_data = fetch_api_data("simulation/injected_attacks")
-            injected_attacks = injected_attacks_data.get('injected_attacks', []) if injected_attacks_data else []
+        # Fetch ALL available data to ensure we capture all attacks
+        # Use a large number to get all stored data
+        forecast_data = fetch_api_data("forecast", {"hours": 10000})
+        alerts_for_analysis = fetch_api_data("alerts", {"limit": 100})
+        
+        if forecast_data and forecast_data.get('data'):
+            data_df = pd.DataFrame(forecast_data['data'])
             
-            if injected_attacks:
-                st.header("💉 Attack Injection Analysis View")
-                st.caption("📊 Zoomed view showing only the time periods where attacks were injected (shown only when simulation is stopped)")
+            # === ML MODEL RESPONSE SUMMARY ===
+            st.subheader("📋 Detection Summary")
+            
+            # Analyze each attack
+            for idx, attack in enumerate(active_attacks):
+                attack_type = attack.get('type', 'UNKNOWN')
+                attack_mag = attack.get('magnitude', 0)
+                attack_start = attack.get('start_time', '')
+                attack_end = attack.get('end_time', '')
+                attack_duration = attack.get('duration', 0)
                 
-                # Get enough data to cover all attacks
-                forecast_data = fetch_api_data("forecast", {"hours": 168})  # Get more data to ensure we cover attacks
-                
-                if forecast_data and forecast_data.get('data'):
-                    data_df = pd.DataFrame(forecast_data['data'])
-                    attack_chart = create_attack_focused_chart(data_df, injected_attacks)
+                # Find data during attack period
+                try:
+                    attack_start_dt = pd.to_datetime(attack_start)
+                    attack_end_dt = pd.to_datetime(attack_end)
+                    timestamps = pd.to_datetime(data_df['timestamp'])
                     
-                    if attack_chart:
-                        st.plotly_chart(attack_chart, width='stretch')
+                    # Check if attack period is within our data range
+                    data_start = timestamps.min()
+                    data_end = timestamps.max()
+                    
+                    # Adjust attack times to be within data range if needed
+                    effective_start = max(attack_start_dt, data_start)
+                    effective_end = min(attack_end_dt, data_end)
+                    
+                    attack_mask = (timestamps >= effective_start) & (timestamps <= effective_end)
+                    attack_data = data_df[attack_mask]
+                    
+                    if len(attack_data) > 0:
+                        # Calculate detection metrics
+                        deviations = np.abs(attack_data['scaling_ratio'] - 1.0) * 100
+                        max_deviation = deviations.max()
+                        avg_deviation = deviations.mean()
+                        detected_hours = (deviations > 9).sum()  # Hours where anomaly was detected
                         
-                        # Show attack details
-                        st.info(f"**{len(injected_attacks)} Attack(s) Injected During Simulation:**")
-                        for idx, attack in enumerate(injected_attacks, 1):
-                            st.caption(f"  {idx}. **{attack.get('type', 'UNKNOWN')}** attack: "
-                                     f"{attack.get('start_time', '')} to {attack.get('end_time', '')} "
-                                     f"(Magnitude: {attack.get('magnitude', 0):.2f}, Duration: {attack.get('duration', 0)} hours)")
+                        # Determine severity (matching config.py thresholds)
+                        # EMERGENCY_THRESHOLD = 0.50 (50%)
+                        # Strong: >40%, Medium: 25-40%, Weak: 9-25%
+                        if max_deviation > 50:
+                            severity = "EMERGENCY"
+                            severity_color = "#DC143C"
+                            severity_icon = "🔴"
+                            severity_desc = "INSTANT ALERT - Critical grid threat!"
+                        elif max_deviation > 40:
+                            severity = "HIGH"
+                            severity_color = "#FF6347"
+                            severity_icon = "🟠"
+                            severity_desc = "Strong attack - Fast detection (1hr)"
+                        elif max_deviation > 25:
+                            severity = "MEDIUM"
+                            severity_color = "#FFA500"
+                            severity_icon = "🟡"
+                            severity_desc = "Medium attack - Standard detection (2hr)"
+                        elif max_deviation > 9:
+                            severity = "LOW"
+                            severity_color = "#90EE90"
+                            severity_icon = "🟢"
+                            severity_desc = "Weak attack - Extended detection (3hr)"
+                        else:
+                            severity = "UNDETECTED"
+                            severity_color = "#888"
+                            severity_icon = "⚪"
+                            severity_desc = "Below 9% threshold"
+                        
+                        # Detection method based on config thresholds
+                        if max_deviation > 50:
+                            method = "Emergency Mode (Instant)"
+                        elif max_deviation > 40:
+                            method = "DP + Statistical Hybrid"
+                        elif max_deviation > 25:
+                            method = "DP + Statistical Hybrid"
+                        elif max_deviation > 9:
+                            method = "DP Algorithm"
+                        else:
+                            method = "Below Threshold"
+                        
+                        # Display attack analysis card
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
+                                    border-radius: 10px; padding: 20px; margin: 10px 0;
+                                    border-left: 5px solid {severity_color};">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <h3 style="color: white; margin: 0;">💉 Attack #{idx+1}: {attack_type}</h3>
+                                    <p style="color: #888; margin: 5px 0;">Magnitude: {attack_mag:.2f} | Duration: {attack_duration}h</p>
+                                    <p style="color: #666; font-size: 0.9rem;">{attack_start} → {attack_end}</p>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="font-size: 2rem;">{severity_icon}</div>
+                                    <div style="color: {severity_color}; font-weight: bold;">{severity}</div>
+                                </div>
+                            </div>
+                            <hr style="border-color: #333; margin: 15px 0;">
+                            <div style="display: flex; justify-content: space-around; text-align: center;">
+                                <div>
+                                    <div style="color: #00d4ff; font-size: 1.5rem; font-weight: bold;">{max_deviation:.1f}%</div>
+                                    <div style="color: #888; font-size: 0.8rem;">Max Deviation</div>
+                                </div>
+                                <div>
+                                    <div style="color: #00ff88; font-size: 1.5rem; font-weight: bold;">{avg_deviation:.1f}%</div>
+                                    <div style="color: #888; font-size: 0.8rem;">Avg Deviation</div>
+                                </div>
+                                <div>
+                                    <div style="color: #ffa500; font-size: 1.5rem; font-weight: bold;">{detected_hours}/{attack_duration}</div>
+                                    <div style="color: #888; font-size: 0.8rem;">Hours Detected</div>
+                                </div>
+                                <div>
+                                    <div style="color: #DDA0DD; font-size: 1rem; font-weight: bold;">{method}</div>
+                                    <div style="color: #888; font-size: 0.8rem;">Detection Method</div>
+                                </div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     else:
-                        st.warning("⚠️ Attack data not available in the displayed time range. The attack may have occurred outside the current data window.")
-                else:
-                    st.info("ℹ️ No data available. Run simulation and inject attacks to see this view.")
-                
-                st.divider()
+                        # Show why no data - helpful for debugging
+                        st.warning(f"Attack #{idx+1} ({attack_type}): Attack period ({attack_start} to {attack_end}) has no matching data. Data range: {data_start} to {data_end}")
+                except Exception as e:
+                    st.warning(f"Attack #{idx+1}: Could not analyze - {str(e)}")
+            
+            st.divider()
+            
+            # === VISUAL CHART ===
+            st.subheader("📈 Attack Period Visualization")
+            attack_chart = create_attack_focused_chart(data_df, active_attacks)
+            
+            if attack_chart:
+                st.plotly_chart(attack_chart, use_container_width=True)
+        
+        st.divider()
     
-    # Main real-time chart
-    st.header("📊 Real-Time Load Chart")
+    # Main chart
+    st.header("📊 Load Analysis Chart")
     
-    # Get available data to determine time range
-    forecast_data_all = fetch_api_data("forecast", {"hours": 168})  # Get max data to determine range
+    forecast_data_all = fetch_api_data("forecast", {"hours": 168})
     
-    if forecast_data_all and forecast_data_all.get('data'):
+    if forecast_data_all and forecast_data_all.get('data') and len(forecast_data_all['data']) > 0:
         all_data_df = pd.DataFrame(forecast_data_all['data'])
         
-        if len(all_data_df) > 0:
-            # Convert timestamps
-            all_timestamps = pd.to_datetime(all_data_df['timestamp'])
-            min_time = all_timestamps.min()
-            max_time = all_timestamps.max()
+        if len(all_data_df) > 1:
+            max_hours = max(2, min(168, len(all_data_df)))  # Ensure at least 2
+            default_hours = min(24, max_hours)
             
-            # Time range selector
-            use_custom_range = st.checkbox("📅 Use custom time range", value=False, help="Select specific start and end times instead of 'last N hours'")
+            hours_slider = st.slider(
+                "Time Range (hours)", 
+                min_value=1, 
+                max_value=max_hours, 
+                value=default_hours,
+                key="analysis_hours_slider"
+            )
             
-            if use_custom_range:
-                # Custom time range selector
-                # Convert to datetime objects for slider
-                min_timestamp = min_time.to_pydatetime()
-                max_timestamp = max_time.to_pydatetime()
-                
-                # Default to last 24 hours
-                default_start = max(min_timestamp, max_timestamp - timedelta(hours=24))
-                default_end = max_timestamp
-                
-                # Create time range slider with proper initialization
-                time_range = st.slider(
-                    "Select Time Range",
-                    min_value=min_timestamp,
-                    max_value=max_timestamp,
-                    value=(default_start, default_end),
-                    format="YYYY-MM-DD HH:mm",
-                    key="time_range_slider"
-                )
-                
-                start_time, end_time = time_range
-                
-                # Filter data to selected range
-                mask = (all_timestamps >= pd.to_datetime(start_time)) & (all_timestamps <= pd.to_datetime(end_time))
-                filtered_data = all_data_df[mask].copy()
-                
-                if len(filtered_data) > 0:
-                    chart = create_load_chart(filtered_data, hours=None, active_attacks=active_attacks)
-                    if chart:
-                        st.plotly_chart(chart, width='stretch')
-                    hours_span = (end_time - start_time).total_seconds() / 3600
-                    st.caption(f"📊 Showing {len(filtered_data)} hours from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
+            forecast_data = fetch_api_data("forecast", {"hours": hours_slider})
+            
+            if forecast_data and forecast_data.get('data') and len(forecast_data['data']) > 0:
+                data_df = pd.DataFrame(forecast_data['data'])
+                chart = create_load_chart(data_df, hours=hours_slider, active_attacks=active_attacks)
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
                 else:
-                    st.warning("⚠️ No data in selected time range. Try adjusting the range.")
+                    st.warning("Could not render chart. Try adjusting the time range.")
             else:
-                # Default: Last N hours
-                max_hours = min(168, len(all_data_df))
-                hours_slider = st.slider("Time Range (hours)", min_value=1, max_value=max_hours, value=24, key="hours_slider")
-                
-                # Get last N hours
-                forecast_data = fetch_api_data("forecast", {"hours": hours_slider})
-                
-                if forecast_data and forecast_data.get('data'):
-                    data_df = pd.DataFrame(forecast_data['data'])
-                    chart = create_load_chart(data_df, hours=hours_slider, active_attacks=active_attacks)
-                    if chart:
-                        st.plotly_chart(chart, width='stretch')
-                else:
-                    st.info("No data available.")
+                st.warning("No data available for the selected time range.")
         else:
-            st.info("No data available. Start simulation to see chart.")
+            st.info("Not enough data points. Run simulation longer to see chart.")
     else:
         st.info("No data available. Start simulation to see chart.")
     
-    # Legend for chart colors
+    # Legend
     with st.expander("📖 Chart Legend"):
         st.markdown("""
         **Lines:**
-        - **Actual Load** (Blue solid): Real measured power grid load
-        - **Forecast** (Green dashed): LSTM model prediction
-        - **Benchmark** (Orange dotted): Normal pattern from K-means clustering
+        - 🔵 **Actual Load** (Blue solid): Real measured power grid load
+        - 🟢 **Forecast** (Green dashed): LSTM model prediction  
+        - 🟠 **Benchmark** (Orange dotted): Normal pattern from K-means clustering
         
-        **Shaded Regions:**
-        - **Purple regions**: Injected attacks (darker = stronger attack, lighter = weaker attack)
-        - **Red regions**: Detected anomalies (system detected potential attacks)
+        **Attack Regions (Purple):**
+        - 💉 Injected attacks shown with purple shading (darker = stronger magnitude)
         
-        **Attack Color Intensity:**
-        - **Light Purple** (0.1-0.5 magnitude): Weak attacks
-        - **Medium Purple** (0.5-1.0 magnitude): Medium attacks
-        - **Dark Purple** (1.0+ magnitude): Strong attacks
+        **Anomaly Detection Severity (Color-coded):**
+        - 🟢 **LOW** (9-15% deviation): Light green - Minor anomaly
+        - 🟡 **MEDIUM** (15-25% deviation): Orange - Moderate anomaly
+        - 🟠 **HIGH** (25-40% deviation): Red-Orange - Significant anomaly
+        - 🔴 **EMERGENCY** (>40% deviation): Deep Red - Critical anomaly
         """)
     
-    # Alerts panel - Beautiful UI
+    # Alerts
     st.header("🚨 Alerts & Detections")
     
     alerts_data = fetch_api_data("alerts", {"limit": 50})
     if alerts_data and alerts_data.get('alerts'):
         alerts = alerts_data['alerts']
         
-        # Filter options in a nice layout
-        filter_col1, filter_col2, filter_col3 = st.columns([2, 2, 1])
-        with filter_col1:
-            severity_filter = st.multiselect(
-                "🔍 Filter by Severity", 
-                ["LOW", "MEDIUM", "HIGH", "EMERGENCY"],
-                default=["LOW", "MEDIUM", "HIGH", "EMERGENCY"],
-                help="Select which alert severities to display"
-            )
-        with filter_col2:
-            show_acknowledged = st.checkbox("✅ Show Acknowledged Alerts", value=False, help="Toggle to show/hide acknowledged alerts")
-        with filter_col3:
-            st.metric("Total Alerts", len(alerts))
+        severity_filter = st.multiselect("🔍 Filter by Severity", 
+            ["LOW", "MEDIUM", "HIGH", "EMERGENCY"],
+            default=["LOW", "MEDIUM", "HIGH", "EMERGENCY"])
         
-        # Display alerts
-        filtered_alerts = alerts
-        if severity_filter:
-            filtered_alerts = [a for a in filtered_alerts if a.get('severity') in severity_filter]
-        if not show_acknowledged:
-            filtered_alerts = [a for a in filtered_alerts if not a.get('acknowledged', False)]
+        filtered_alerts = [a for a in alerts if a.get('severity') in severity_filter]
         
         if filtered_alerts:
             st.caption(f"Showing {len(filtered_alerts)} alert(s)")
-            
-            # Display alerts in cards
-            for idx, alert in enumerate(filtered_alerts[:20]):  # Show first 20
+            for alert in filtered_alerts[:20]:
                 severity = alert.get('severity', 'LOW')
+                severity_colors = {'LOW': '#51cf66', 'MEDIUM': '#ffa94d', 'HIGH': '#ff6b6b', 'EMERGENCY': '#c92a2a'}
+                severity_icons = {'LOW': '🟢', 'MEDIUM': '🟡', 'HIGH': '🟠', 'EMERGENCY': '🔴'}
                 
-                # Severity colors
-                severity_colors = {
-                    'LOW': '#51cf66',
-                    'MEDIUM': '#ffa94d',
-                    'HIGH': '#ff6b6b',
-                    'EMERGENCY': '#c92a2a'
-                }
-                severity_icons = {
-                    'LOW': '🟢',
-                    'MEDIUM': '🟡',
-                    'HIGH': '🟠',
-                    'EMERGENCY': '🔴'
-                }
-                
-                color = severity_colors.get(severity, '#51cf66')
-                icon = severity_icons.get(severity, '🟢')
-                
-                # Create alert card
-                with st.container():
-                    st.markdown(f"""
-                    <div style="
-                        background-color: {color}15;
-                        border-left: 4px solid {color};
-                        padding: 1rem;
-                        margin: 0.5rem 0;
-                        border-radius: 0.25rem;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    ">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <div>
-                                <strong>{icon} {severity}</strong>
-                                <br>
-                                <small style="color: #666;">
-                                    📅 {alert.get('start_time', 'N/A')} → {alert.get('end_time', 'N/A')}
-                                </small>
-                            </div>
-                            <div style="text-align: right;">
-                                <small><strong>Method:</strong> {alert.get('method', 'N/A')}</small>
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Acknowledge button
-                    if not alert.get('acknowledged', False):
-                        if st.button(f"✅ Acknowledge", key=f"ack_{idx}_{alert.get('start_time', '')}"):
-                            st.success("Alert acknowledged (Note: API endpoint needed)")
-                    
-                    st.markdown("---")
+                st.markdown(f"""
+                <div style="background-color: {severity_colors.get(severity, '#51cf66')}15; 
+                    border-left: 4px solid {severity_colors.get(severity, '#51cf66')}; 
+                    padding: 0.5rem; margin: 0.25rem 0; border-radius: 0.25rem;">
+                    <strong>{severity_icons.get(severity, '🟢')} {severity}</strong> | 
+                    📅 {alert.get('start_time', 'N/A')} → {alert.get('end_time', 'N/A')} | 
+                    Method: {alert.get('method', 'N/A')}
+                </div>
+                """, unsafe_allow_html=True)
         else:
-            st.info("ℹ️ No alerts match the selected filters.")
+            st.info("ℹ️ No alerts match filters.")
     else:
-        st.success("✅ No alerts detected - System operating normally!")
+        st.success("✅ No alerts - System operating normally!")
     
-    # Performance metrics with tooltips
+    # Performance metrics
     st.header("📈 Performance Metrics")
-    st.caption("Hover over each metric for detailed explanation")
     
     metrics_data = fetch_api_data("metrics")
     if metrics_data and 'metrics' in metrics_data:
         metrics = metrics_data['metrics']
         
-        # Check if metrics are actually populated
-        has_data = (
-            metrics.get('hours_processed', 0) > 0 or
-            metrics.get('throughput_hours_per_sec', 0) > 0 or
-            metrics.get('latency', {}).get('count', 0) > 0
-        )
-        
-        if not has_data and status_data and status_data.get('simulation', {}).get('is_running'):
-            st.warning("⚠️ Performance metrics are being collected. They will appear after processing a few hours of data.")
-        elif not has_data:
-            st.info("ℹ️ Performance metrics will be available when simulation is running.")
-        
-        # Metrics with tooltips using expandable sections
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             latency = metrics.get('latency', {})
             latency_mean = latency.get('mean')
-            if latency_mean is not None and latency.get('count', 0) > 0:
-                st.metric("⏱️ Mean Latency", f"{latency_mean:.3f}s")
-            else:
-                st.metric("⏱️ Mean Latency", "N/A")
-            with st.expander("ℹ️ What is Mean Latency?"):
-                st.caption("Average time taken to process one hour of data. Lower is better. Includes forecast generation, benchmark lookup, and anomaly detection.")
+            st.metric("⏱️ Mean Latency", f"{latency_mean:.3f}s" if latency_mean else "N/A")
         
         with col2:
-            throughput = metrics.get('throughput_hours_per_sec', 0)
-            if throughput > 0:
-                st.metric("⚡ Throughput", f"{throughput:.2f} hrs/sec")
-            else:
-                st.metric("⚡ Throughput", "0.00 hrs/sec")
-            with st.expander("ℹ️ What is Throughput?"):
-                st.caption("Number of hours of data processed per second. Higher is better. Shows how fast the system can analyze historical data.")
+            st.metric("⚡ Throughput", f"{metrics.get('throughput_hours_per_sec', 0):.2f} hrs/sec")
         
         with col3:
-            memory = metrics.get('memory', {})
-            memory_mb = memory.get('memory_mb', 0)
-            if memory_mb > 0:
-                st.metric("💾 Memory Usage", f"{memory_mb:.0f} MB")
-            else:
-                st.metric("💾 Memory Usage", "N/A")
-            with st.expander("ℹ️ What is Memory Usage?"):
-                st.caption("Current RAM consumption by the system. Includes data storage (30-day retention), models (LSTM, K-means), and processing buffers.")
+            memory_mb = metrics.get('memory', {}).get('memory_mb', 0)
+            st.metric("💾 Memory", f"{memory_mb:.0f} MB" if memory_mb > 0 else "N/A")
         
         with col4:
-            hours_processed = metrics.get('hours_processed', 0)
-            st.metric("📊 Hours Processed", hours_processed)
-            with st.expander("ℹ️ What is Hours Processed?"):
-                st.caption("Total number of hours of data analyzed since simulation started. Used to track system progress and data coverage.")
+            st.metric("📊 Hours Processed", metrics.get('hours_processed', 0))
+
+
+def main():
+    """Main dashboard function with live/analysis mode switching."""
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Control Panel")
         
-        # Latency distribution chart with explanation
-        if latency.get('count', 0) > 0:
-            st.subheader("📈 Latency Distribution")
-            with st.expander("ℹ️ Understanding Latency Percentiles"):
-                st.markdown("""
-                - **Mean**: Average processing time
-                - **P50 (Median)**: 50% of requests complete faster than this
-                - **P95**: 95% of requests complete faster than this (handles outliers)
-                - **P99**: 99% of requests complete faster than this (worst-case scenarios)
-                
-                Lower values indicate better performance.
-                """)
-            latency_data = {
-                'Mean': latency.get('mean', 0),
-                'P50': latency.get('p50', 0),
-                'P95': latency.get('p95', 0),
-                'P99': latency.get('p99', 0)
-            }
-            st.bar_chart(latency_data)
-    
-    # Auto-refresh - only refresh if simulation is running
-    auto_refresh_enabled = st.checkbox("🔄 Auto-refresh", value=False)
-    
-    if auto_refresh_enabled:
-        # Check if simulation is running before refreshing
-        if status_data and status_data.get('simulation', {}).get('is_running'):
-            refresh_interval = st.selectbox("Refresh Interval", [5, 10, 15, 30], index=0, key="refresh_interval")
-            st.caption(f"Auto-refreshing every {refresh_interval} seconds (simulation running)")
-            time.sleep(refresh_interval)
-            st.rerun()
+        # Simulation control
+        st.subheader("Simulation Control")
+        status_data = fetch_api_data("status")
+        
+        is_running = False
+        if status_data and status_data.get('simulation'):
+            sim_status = status_data['simulation']
+            is_running = sim_status.get('is_running', False)
+            
+            if is_running:
+                st.success("🟢 Simulation Running")
+                if st.button("⏹️ Stop Simulation"):
+                    result = post_api_data("simulation/stop")
+                    if result and result.get('status') == 'success':
+                        st.success("Simulation stopped")
+                        st.rerun()
+            else:
+                st.info("⚪ Simulation Stopped")
+                speed = st.number_input("Speed (1x = real-time)", min_value=1.0, value=100.0, step=10.0)
+                if st.button("▶️ Start Simulation"):
+                    result = post_api_data("simulation/start", {"speed": speed})
+                    if result and result.get('status') == 'success':
+                        st.success("Simulation started")
+                        st.rerun()
+            
+            # Speed control
+            if is_running:
+                current_speed = sim_status.get('speed', 100.0)
+                new_speed = st.slider("Simulation Speed", min_value=1.0, max_value=1000.0, 
+                                     value=float(current_speed), step=10.0)
+                if new_speed != current_speed:
+                    post_api_data("simulation/speed", {"speed": new_speed})
+            
+            # Reset
+            st.divider()
+            if st.button("🗑️ Reset Simulation"):
+                if st.session_state.get('reset_confirmed', False):
+                    result = post_api_data("simulation/reset")
+                    if result and result.get('status') == 'success':
+                        st.success("✅ Reset!")
+                        st.session_state.reset_confirmed = False
+                        st.session_state.live_data = {
+                            'hours_processed': 0, 'recent_actuals': [], 'recent_forecasts': [],
+                            'recent_timestamps': [], 'alerts_count': 0, 'last_timestamp': None
+                        }
+                        st.rerun()
+                else:
+                    st.session_state.reset_confirmed = True
+                    st.warning("⚠️ Click again to confirm")
+        
+        st.divider()
+        
+        # Attack injection
+        st.subheader("💉 Attack Injection")
+        
+        attack_type = st.selectbox("Attack Type",
+            ["PULSE", "SCALING", "RAMPING", "RANDOM", "SMOOTH-CURVE", 
+             "POINT-BURST", "CONTEXTUAL-SEASONAL", "RAMPING-TYPE2"])
+        
+        attack_start = st.number_input("Start Hour (offset)", min_value=0, value=5)
+        attack_duration = st.number_input("Duration (hours)", min_value=1, value=2)
+        attack_magnitude = st.slider("Magnitude", min_value=0.1, max_value=10.0, value=0.5, step=0.1)
+        
+        if st.button("💉 Inject Attack"):
+            result = post_api_data("simulation/inject_attack", {
+                "type": attack_type, "start_hour": attack_start,
+                "duration": attack_duration, "magnitude": attack_magnitude
+            })
+            if result and result.get('status') == 'success':
+                st.success("Attack injected!")
+            else:
+                st.error("Failed to inject attack")
+        
+        st.divider()
+        
+        # Display mode
+        st.subheader("🖥️ Display Mode")
+        if is_running:
+            use_live_mode = st.checkbox("🔴 Live Mode", value=True, 
+                                       help="Fast polling with minimal UI")
         else:
-            st.caption("⏸️ Auto-refresh paused (simulation stopped)")
+            use_live_mode = False
+            st.caption("Live mode available when simulation is running")
+    
+    # Main content
+    if is_running and use_live_mode:
+        render_live_mode(status_data)
+        
+        # Fast refresh for live mode (1 second)
+        time.sleep(1)
+        st.rerun()
+    else:
+        render_analysis_mode(status_data)
 
 
 if __name__ == "__main__":
