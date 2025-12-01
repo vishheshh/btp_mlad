@@ -1,0 +1,658 @@
+%----------------------------------------------------------------------------------------
+%    PACKAGES AND THEMES
+%----------------------------------------------------------------------------------------
+
+\documentclass[aspectratio=169,xcolor=dvipsnames]{beamer}
+\usetheme{SimpleDarkBlue}
+
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Code listing style
+\lstset{
+    basicstyle=\tiny\ttfamily,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{lightgray!20}
+}
+
+%----------------------------------------------------------------------------------------
+%    TITLE PAGE
+%----------------------------------------------------------------------------------------
+
+\title{Smart Anomaly Detection for Power Grid Cyber-Attack Protection}
+\subtitle{Using Machine Learning to Secure Load Forecasting Systems}
+
+\author{[Your Name] \\ Roll Number: [Your Roll Number]}
+
+\institute
+{
+    [Your Department] \\
+    [Your Institution] \\
+    Guide: [Professor Name]
+}
+\date{\today}
+
+%----------------------------------------------------------------------------------------
+%    PRESENTATION SLIDES
+%----------------------------------------------------------------------------------------
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+\begin{frame}{Overview}
+    \tableofcontents
+\end{frame}
+
+%------------------------------------------------
+\section{Problem \& Dataset}
+%------------------------------------------------
+
+\begin{frame}{THE PROBLEM - Why This Matters}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{Real-World Scenario}
+            \begin{itemize}
+                \item Power grids rely on \textbf{load forecasting}
+                \item Cyber-attackers manipulate data
+                \item \textbf{Challenge}: Detect genuine attacks
+            \end{itemize}
+        \end{block}
+        
+        \begin{block}{Normal vs Attack}
+            \small
+            Normal: Forecast 1000 MW $\rightarrow$ Actual 1010 MW \textcolor{green}{$\checkmark$} \\
+            Attack: Forecast 1200 MW $\rightarrow$ Actual 1000 MW \textcolor{red}{$\times$}
+        \end{block}
+        
+        \begin{alertblock}{Our Solution}
+            Smart system that learns patterns AND detects anomalies
+        \end{alertblock}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide2_normal_vs_attack.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{OUR DATASET - Real Power Grid Data}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{Source: ISO-NE}
+            \textbf{Independent System Operator - New England}
+            \begin{itemize}
+                \item 6 US states, 14+ million people
+                \item Hourly electricity load readings
+                \item Real grid operations data
+            \end{itemize}
+        \end{block}
+        
+        \begin{table}
+            \centering
+            \small
+            \begin{tabular}{ll}
+                \toprule
+                \textbf{Parameter} & \textbf{Value} \\
+                \midrule
+                Files & 97 CSV files \\
+                Duration & 4 years (2021-2025) \\
+                Hours & 34,702 readings \\
+                Coverage & 6 states \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide3_yearly_pattern.png}
+        \end{center}
+        \vspace{-0.3cm}
+        \begin{alertblock}{\small Why Perfect?}
+            \small
+            Real operational $\mid$ Long duration $\mid$ High resolution $\mid$ Diverse patterns
+        \end{alertblock}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+\section{System Architecture}
+%------------------------------------------------
+
+\begin{frame}{SYSTEM OVERVIEW - The Big Picture}
+    \begin{block}{Our 4-Component Smart Detection System}
+        \begin{enumerate}
+            \item \textbf{LSTM Neural Network} - Forecaster (predicts expected load)
+            \item \textbf{K-Means Clustering} - Benchmark (defines normal patterns)
+            \item \textbf{Dynamic Programming} - Detection (finds attack timing)
+            \item \textbf{Statistical Testing} - Validation (confirms attacks)
+        \end{enumerate}
+    \end{block}
+    
+    \begin{alertblock}{Key Insight}
+        Each component solves ONE specific problem $\rightarrow$ Together, robust detection
+    \end{alertblock}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{COMPONENT 1 - LSTM Forecaster}
+    \begin{columns}[c]
+        \column{0.55\textwidth}
+        \begin{block}{What is LSTM?}
+            \textbf{L}ong \textbf{S}hort-\textbf{T}erm \textbf{M}emory Network
+            \begin{itemize}
+                \item AI that \textbf{remembers patterns over time}
+                \item Like experienced grid operator
+            \end{itemize}
+        \end{block}
+        
+        \begin{table}
+            \centering
+            \footnotesize
+            \begin{tabular}{lccc}
+                \toprule
+                \textbf{Approach} & \textbf{Time?} & \textbf{Memory?} & \textbf{Result} \\
+                \midrule
+                Simple NN & $\times$ & $\times$ & Poor \\
+                \textbf{LSTM} & $\checkmark$ & $\checkmark$ & \textbf{Excellent} \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \begin{alertblock}{Performance}
+            Training Error: $\sim$100 MW $\mid$ Testing: $\sim$120 MW $\mid$ \textbf{98.8\% Accuracy}
+        \end{alertblock}
+        
+        \column{0.45\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide5_lstm_architecture.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{COMPONENT 2 - K-Means Clustering}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{The Problem}
+            Days have different load shapes:
+            \begin{itemize}
+                \item Summer: High afternoon (AC)
+                \item Winter: Dual peaks (heating)
+                \item Weekend: Lower, flatter
+            \end{itemize}
+        \end{block}
+        
+        \begin{block}{Solution: K-Means}
+            \begin{itemize}
+                \item Finds \textbf{typical daily patterns}
+                \item Groups similar days
+                \item Creates 5 benchmark profiles
+            \end{itemize}
+        \end{block}
+        
+        \begin{alertblock}{Why 5 Clusters?}
+            \small
+            Too few: Misses variations $\mid$ Too many: Overfits $\mid$ \textbf{5 = sweet spot}
+        \end{alertblock}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide6_cluster_profiles.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{COMPONENT 3 - Dynamic Programming}
+    \begin{block}{The Challenge}
+        Given 168 hours (1 week), \textbf{when exactly} did the attack happen?
+    \end{block}
+    
+    \begin{columns}[c]
+        \column{0.6\textwidth}
+        \begin{table}
+            \centering
+            \small
+            \begin{tabular}{llll}
+                \toprule
+                \textbf{Deviation} & \textbf{Strength} & \textbf{Multiplier} & \textbf{Reason} \\
+                \midrule
+                10-20\% & Weak & $\times$ 5 & Extra sensitivity \\
+                30-100\% & Medium & $\times$ 2 & Clear anomaly \\
+                >200\% & Strong & $\times$ 10 & Grid-destroying \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \begin{alertblock}{Emergency Mode}
+            If >50\% deviation:
+            \begin{itemize}
+                \item INSTANT ALERT (1-hour detection)
+                \item Bypass normal 3-hour requirement
+                \item Critical for response time
+            \end{itemize}
+        \end{alertblock}
+        
+        \column{0.4\textwidth}
+        \begin{block}{DP Algorithm}
+            Finds \textbf{most suspicious consecutive hours} collectively
+        \end{block}
+        
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide8_normal_distribution.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{COMPONENT 4 - Statistical Testing}
+    \begin{block}{The Phase 4 Innovation}
+        Problem: \textbf{Natural spikes competed with weak attacks}
+    \end{block}
+    
+    \begin{columns}[c]
+        \column{0.6\textwidth}
+        \begin{block}{Solution: Hypothesis Testing}
+            \small
+            "Is this statistically UNUSUAL?"
+            \begin{enumerate}
+                \item Model normal baseline: $\mu = 8\%$, $\sigma = 3\%$
+                \item Calculate p-value for each interval
+                \item If p < 0.01 $\rightarrow$ ATTACK!
+            \end{enumerate}
+        \end{block}
+        
+        \begin{table}
+            \centering
+            \footnotesize
+            \begin{tabular}{lccc}
+                \toprule
+                \textbf{Method} & \textbf{Natural} & \textbf{Weak Attack} & \textbf{Result} \\
+                \midrule
+                DP Only & Detected & Missed & FAILS \\
+                Statistical & Filtered & Detected & SUCCESS \\
+                \textbf{Hybrid} & Filtered & Detected & \textbf{BEST} \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \column{0.4\textwidth}
+        \begin{alertblock}{Safeguards}
+            \begin{itemize}
+                \item \textbf{Bonferroni}: Multiple testing
+                \item \textbf{Cohen's d}: Practical significance
+            \end{itemize}
+        \end{alertblock}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+\section{Testing \& Results}
+%------------------------------------------------
+
+\begin{frame}{ATTACK TYPES WE TESTED}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{table}
+            \centering
+            \footnotesize
+            \begin{tabular}{llll}
+                \toprule
+                \textbf{Type} & \textbf{Scenarios} & \textbf{Detection} & \textbf{Status} \\
+                \midrule
+                PULSE & 18 & 88.9\% & $\checkmark$ \\
+                SCALING & 54 & \textbf{94.4\%} & $\checkmark$ \\
+                RAMPING & 21 & 90.5\% & $\checkmark$ \\
+                RANDOM & 5 & \textbf{100\%} & $\checkmark$ \\
+                Others & 0 & N/A & Pending \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \begin{alertblock}{Total Tested}
+            \textbf{98 scenarios} across 5 types
+        \end{alertblock}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide9_attack_types.png}
+        \end{center}
+    \end{columns}
+    
+    \vspace{0.3cm}
+    
+    \begin{block}{Attack Descriptions}
+        \small
+        \textbf{PULSE}: Instant spike $\mid$ \textbf{SCALING}: Sustained manipulation $\mid$ \textbf{RAMPING}: Gradual change $\mid$ \textbf{RANDOM}: Chaotic noise
+    \end{block}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{OUR JOURNEY - Phase Progress}
+    \begin{columns}[c]
+        \column{0.45\textwidth}
+        \begin{block}{Phase 1: Foundation}
+            \small
+            Interval: 62h $\rightarrow$ 8h (87\% reduction)
+        \end{block}
+        
+        \begin{block}{Phase 2: Weak Focus}
+            \small
+            Discovered evaluation issue
+        \end{block}
+        
+        \begin{block}{Phase 3: Breakthrough}
+            \small
+            Weak: 4.8\% $\rightarrow$ 38.1\% (8x!)
+        \end{block}
+        
+        \begin{alertblock}{Phase 4: Current}
+            \small
+            \textbf{Weak: 93.5\%} $\checkmark$ \\
+            Medium: 88.4\% $\checkmark$ \\
+            Strong: 100\% $\checkmark$
+        \end{alertblock}
+        
+        \column{0.55\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide10_phase_progress.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{Progress Summary Table}
+    \begin{table}
+        \centering
+        \small
+        \begin{tabular}{lccccc}
+            \toprule
+            \textbf{Metric} & \textbf{Base} & \textbf{P1} & \textbf{P2} & \textbf{P3} & \textbf{P4} \\
+            \midrule
+            Weak Detection & 0\% & 4.8\% & 4.8\% & 38.1\% & \textbf{93.5\%} \\
+            Medium Detection & 50\% & 75\% & 80\% & 60\% & \textbf{88.4\%} \\
+            Strong Detection & 100\% & 100\% & 100\% & 100\% & \textbf{100\%} \\
+            Overall Correct & 40\% & 46.8\% & 48.9\% & 56.1\% & \textbf{92.9\%} \\
+            False Positive & 5\% & 0.13\% & 0.16\% & <1\% & \textbf{<1\%} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{WHY NOT JUST KNN?}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{table}
+            \centering
+            \footnotesize
+            \begin{tabular}{lll}
+                \toprule
+                \textbf{Aspect} & \textbf{KNN} & \textbf{MLAD} \\
+                \midrule
+                Temporal & $\times$ & $\checkmark$ LSTM \\
+                Duration & $\times$ & $\checkmark$ DP \\
+                Weak & $\times$ & $\checkmark$ Stats \\
+                Emergency & $\times$ & $\checkmark$ 1-hr \\
+                False+ & 10-15\% & <1\% \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \begin{alertblock}{Key Insight}
+            \small
+            KNN = One tool for all \\
+            MLAD = 4 specialized tools
+        \end{alertblock}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide11_knn_comparison.png}
+        \end{center}
+    \end{columns}
+    
+    \vspace{0.3cm}
+    
+    \begin{table}
+        \centering
+        \footnotesize
+        \begin{tabular}{lccl}
+            \toprule
+            \textbf{Attack} & \textbf{KNN} & \textbf{MLAD} & \textbf{Improvement} \\
+            \midrule
+            Strong & 90\% & \textbf{100\%} & +10\% \\
+            Medium & 45\% & \textbf{88.4\%} & +43.4\% \\
+            Weak & $\sim$5\% & \textbf{93.5\%} & \textbf{+88.5\%} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{RESULTS SHOWCASE}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{Test Configuration}
+            \small
+            \begin{itemize}
+                \item 98 attack scenarios
+                \item 6,000 hours real data
+                \item Magnitudes: 10-900\%
+                \item Durations: 1-48 hours
+            \end{itemize}
+        \end{block}
+        
+        \begin{table}
+            \centering
+            \footnotesize
+            \begin{tabular}{ll}
+                \toprule
+                \textbf{Metric} & \textbf{Value} \\
+                \midrule
+                Detected & 96/98 (98\%) \\
+                Correct & 91/98 (92.9\%) \\
+                False+ & <1\% \\
+                Response & 1 hour \\
+                \bottomrule
+            \end{tabular}
+        \end{table}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide12_detection_rates.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{OUTPUT SHOWCASE - Detection Plot}
+    \begin{center}
+        \includegraphics[width=0.85\textwidth]{graphs/slide13_detection_plot.png}
+    \end{center}
+    
+    \begin{block}{Example: SCALING Attack (50\% increase, 20 hours)}
+        \small
+        \textbf{Detection}: Hours 200-219 $\mid$ \textbf{Score}: 45.7 $\mid$ \textbf{Method}: Hybrid (DP + Statistical) $\mid$ \textbf{P-value}: 0.00001 $\mid$ \textbf{Accuracy}: 95\% overlap
+    \end{block}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}[fragile]{Emergency Detection Example}
+    \begin{block}{PULSE Attack (500\% spike, 1 hour)}
+        \begin{lstlisting}
+Attack Injected: Hour 100, Single spike at 500% of normal
+
+System Analysis:
+  Expected: 10,000 MW  |  Attacked: 50,000 MW
+  Deviation: 400% above expected
+
+Detection Output:
+  [!!!] EMERGENCY ALERT: Extreme spike detected!
+        Deviation: 400% (Threshold: 50%)
+        Response: IMMEDIATE ACTION REQUIRED
+
+  [✓] Detection Time: 1 HOUR (instant alert)
+  [→] Location: Hour 100 (exact match!)
+  [→] Method: Emergency Protocol
+
+Grid Operator Action: Immediate investigation & mitigation
+        \end{lstlisting}
+    \end{block}
+\end{frame}
+
+%------------------------------------------------
+\section{Limitations \& Future Work}
+%------------------------------------------------
+
+\begin{frame}{LIMITATIONS \& FUTURE WORK}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{Current Limitations}
+            \small
+            \begin{enumerate}
+                \item 3 attack types untested
+                \item Emergency bypass issue
+                \item Statistical threshold
+                \item Real-time deployment
+            \end{enumerate}
+        \end{block}
+        
+        \begin{block}{Next 3 Months}
+            \small
+            \begin{itemize}
+                \item Test all 8 attack types
+                \item Multi-attack detection
+                \item Real-time simulation
+                \item Adaptive baseline
+            \end{itemize}
+        \end{block}
+        
+        \column{0.5\textwidth}
+        \begin{center}
+            \includegraphics[width=\textwidth]{graphs/slide14_roadmap.png}
+        \end{center}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{Future Enhancements}
+    \begin{block}{Deep Learning Classifier (6-12 months)}
+        \small
+        Transformer model with attention $\mid$ Expected: 75-90\% improvement
+    \end{block}
+    
+    \begin{block}{Explainable AI Dashboard (3-6 months)}
+        \small
+        Visual explanations $\mid$ Feature importance $\mid$ Increased trust
+    \end{block}
+    
+    \begin{block}{Multi-Grid Deployment (12+ months)}
+        \small
+        Multiple grids (PJM, CAISO, ERCOT) $\mid$ Cross-grid correlation $\mid$ National security
+    \end{block}
+    
+    \begin{alertblock}{Research Questions}
+        \small
+        Optimal window size? Attack combinations? Adversarial robustness? Transfer learning?
+    \end{alertblock}
+\end{frame}
+
+%------------------------------------------------
+\section{Conclusion}
+%------------------------------------------------
+
+\begin{frame}{PROJECT SUMMARY}
+    \begin{block}{Key Achievements}
+        \begin{itemize}
+            \item $\checkmark$ \textbf{92.9\% correct detection} across 98 scenarios
+            \item $\checkmark$ \textbf{8x improvement} in weak attack detection
+            \item $\checkmark$ \textbf{<1\% false positive} - production-ready
+            \item $\checkmark$ \textbf{1-hour response} for critical threats
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{Key Innovations}
+        \begin{enumerate}
+            \item LSTM forecasting - Time-aware predictions
+            \item K-means benchmarking - Seasonal patterns
+            \item Dynamic programming - Optimal intervals
+            \item Statistical testing - Rigorous validation
+        \end{enumerate}
+    \end{block}
+    
+    \begin{alertblock}{Real-World Impact}
+        Protects 14M+ people $\mid$ Detects 10-900\% deviations $\mid$ Scalable
+    \end{alertblock}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}{Contact \& Questions}
+    \begin{columns}[c]
+        \column{0.5\textwidth}
+        \begin{block}{Team}
+            \textbf{Student}: [Your Name] \\
+            \textbf{Roll}: [Roll Number] \\
+            \textbf{Guide}: [Professor] \\
+            \textbf{Dept}: [Department]
+        \end{block}
+        
+        \begin{block}{Ready to Answer}
+            \small
+            \textbf{Technical:}
+            \begin{itemize}
+                \item LSTM vs ARIMA?
+                \item Why 5 clusters?
+                \item DP complexity?
+            \end{itemize}
+        \end{block}
+        
+        \column{0.5\textwidth}
+        \begin{block}{Contact}
+            \textbf{Email}: [Your Email] \\
+            \textbf{Repo}: [If applicable]
+        \end{block}
+        
+        \begin{block}{\phantom{Ready to Answer}}
+            \small
+            \textbf{Practical:}
+            \begin{itemize}
+                \item Response time?
+                \item SCADA integration?
+                \item Hardware needs?
+            \end{itemize}
+        \end{block}
+    \end{columns}
+\end{frame}
+
+%------------------------------------------------
+
+\begin{frame}
+    \Huge{\centerline{\textbf{Thank You!}}}
+    \vspace{1cm}
+    \Large{\centerline{Any Questions?}}
+\end{frame}
+
+%----------------------------------------------------------------------------------------
+
+\end{document}
